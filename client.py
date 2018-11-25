@@ -175,7 +175,6 @@ class UPNPBrowser:
 
             if upnp_dir is None:
                 result[id] = title
-
             elif title.text == upnp_dir:
                 result[id] = title
                 break
