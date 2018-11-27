@@ -2,13 +2,16 @@
 
 import upnpclient
 import xml.etree.ElementTree as ET
-import requests
+import argparse
 import datetime
+import requests
 import logging
 import math
 import time
 import sys
 import re
+
+# TODO - store/read timestamp of last execution
 
 
 class UPNPBrowserException(Exception):
@@ -134,7 +137,7 @@ class UPNPBrowser:
         return ns
 
     @staticmethod
-    def list_candidates(candidates):
+    def list_candidates(candidates, download=False, force=False):
 
         to_download = []
 
@@ -155,13 +158,22 @@ class UPNPBrowser:
             duration = res.attrib['duration']
 
             size_str = UPNPBrowser.convert_size(size)
-            print '{0} ({1}) {2} - '.format(title, duration, size_str),
+            print '{0} ({1}) {2}'.format(title, duration, size_str),
 
-            while True:
-                ans = raw_input('Download (y/n)? ')
-                if ans in ('y', 'Y', 'n', 'N'):
-                    ans = ans.lower() == 'y'
-                    break
+            if not download:
+                continue
+
+            if force:
+                print
+                ans = True
+            else:
+                print ' - '
+
+                while True:
+                    ans = raw_input('Download (y/n)? ')
+                    if ans in ('y', 'Y', 'n', 'N'):
+                        ans = ans.lower() == 'y'
+                        break
 
             if ans:
                 candidate = UPNPFile(title, size, url)
@@ -208,9 +220,10 @@ class UPNPBrowser:
 
             end = datetime.datetime.now()
             duration = end - start
-            t = datetime.datetime.utcfromtimestamp(duration)
-            speed = size / t
-            print ' Time: {0} Speed: {1}MB/s'.format(duration, speed)
+            duration -= datetime.timedelta(microseconds=duration.microseconds)
+
+            speed = float(size) / duration.seconds / 1024 / 1024
+            print ' Time: {0} ({1}MB/s)'.format(duration, round(speed,2))
 
             return True
 
@@ -366,16 +379,33 @@ class UPNPBrowser:
 
 def main(targets, start_date):
 
-    if len(sys.argv) == 1:
+    parser = argparse.ArgumentParser(description='Browse and  download UPNP files')
+    parser.add_argument('-l', '--list', action='store_true')
+    parser.add_argument('-d', '--download', action='store_true')
+    parser.add_argument('-f', '--force', action='store_true')
+    parser.add_argument('device_name', nargs='?')
+    args = parser.parse_args()
+
+    if args.list:
+        if args.device_name:
+            raise ValueError('Cannot supply device name with list option')
+        if args.download or args.force:
+            raise ValueError('Option not permitted with list option')
+
         UPNPBrowser.find_devices()
         return True
 
-    upnp = UPNPBrowser(sys.argv[1])
+    download = args.download
+    force = args.force
+
+    upnp = UPNPBrowser(args.device_name)
 
     candidates = upnp.find_content(targets, start_date)
 
-    to_download = upnp.list_candidates(candidates)
-    upnp.download(to_download)
+    to_download = upnp.list_candidates(candidates, download, force)
+
+    if to_download:
+        upnp.download(to_download)
 
     return True
 
