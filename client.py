@@ -3,7 +3,9 @@
 import upnpclient
 import xml.etree.ElementTree as ET
 import requests
+import datetime
 import logging
+import math
 import time
 import sys
 import re
@@ -17,8 +19,25 @@ class UPNPBrowserNoMoreData(Exception):
     pass
 
 
+class UPNPFile:
+
+    def __init__(self, title, size, url):
+
+        self.title = title
+        self.size = size
+        self.url = url
+
+
 class UPNPBrowser:
     UPNP_DEVICES = {
+        'humax2': {
+            'url': 'http://192.168.1.5:55200',
+            'dirs': ['My Contents', 'Recordings']
+        },
+        'humax3': {
+            'url': 'http://192.168.1.5:56790',
+            'dirs': ['My Contents', 'Recordings']
+        },
         'humax': {
             'url': 'http://192.168.1.5:50001',
             'dirs': ['My Contents', 'Recordings']
@@ -28,6 +47,8 @@ class UPNPBrowser:
         }
     }
 
+    PROGRESS_LEN = 50
+
     @staticmethod
     def set_log_handler():
         """ Ensure that ssdp errors have some where to go """
@@ -35,6 +56,24 @@ class UPNPBrowser:
         log = logging.getLogger('ssdp')
         log.addHandler(logging.NullHandler())
         return True
+
+    @staticmethod
+    def convert_size(size):
+
+        if size is None:
+            return 'Unknown'
+
+        if size == 0:
+            return "0B"
+
+        names = ("B", "KB", "MB", "GB")
+
+        i = int(math.floor(math.log(size, 1024)))
+        units = names[i]
+
+        p = math.pow(1024, i)
+        s = round(size / p, 2)
+        return '{0}{1}'.format(s, units)
 
     @staticmethod
     def find_devices():
@@ -94,6 +133,87 @@ class UPNPBrowser:
 
         return ns
 
+    @staticmethod
+    def list_candidates(candidates):
+
+        to_download = []
+
+        if not candidates:
+            print('No videos found matching criteria')
+            return to_download
+
+        for upnp_id in candidates:
+            (title, res) = candidates[upnp_id]
+
+            if res is None:
+                print "Unable to locate res element"
+                continue
+
+            url = res.text
+            title = title.text
+            size = int(res.attrib['size'])
+            duration = res.attrib['duration']
+
+            size_str = UPNPBrowser.convert_size(size)
+            print '{0} ({1}) {2} - '.format(title, duration, size_str),
+
+            while True:
+                ans = raw_input('Download (y/n)? ')
+                if ans in ('y', 'Y', 'n', 'N'):
+                    ans = ans.lower() == 'y'
+                    break
+
+            if ans:
+                candidate = UPNPFile(title, size, url)
+                to_download.append(candidate)
+
+        return to_download
+
+    @staticmethod
+    def download(candidates):
+
+        if not candidates:
+            print('No videos to download')
+            return True
+
+        for candidate in candidates:
+
+            title = candidate.title
+            size = candidate.size
+            src = candidate.url
+
+            dst = '{0}.mp4'.format(title)
+
+            print 'Downloading: {0}'.format(title)
+
+            start = datetime.datetime.now()
+
+            downloaded = 0
+
+            r = requests.get(src, stream=True)
+            with open(dst, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=4096):
+                    if not chunk:
+                        break
+
+                    f.write(chunk)
+
+                    downloaded += len(chunk)
+                    progress = int(UPNPBrowser.PROGRESS_LEN * downloaded / size)
+
+                    sys.stdout.write("\r[{0}{1}]".format('=' * progress, ' ' * (UPNPBrowser.PROGRESS_LEN-progress)))
+                    sys.stdout.flush()
+
+            f.close()
+
+            end = datetime.datetime.now()
+            duration = end - start
+            t = datetime.datetime.utcfromtimestamp(duration)
+            speed = size / t
+            print ' Time: {0} Speed: {1}MB/s'.format(duration, speed)
+
+            return True
+
     def __init__(self, device_name):
 
         UPNPBrowser.set_log_handler()
@@ -150,6 +270,8 @@ class UPNPBrowser:
 
         ns = UPNPBrowser.extract_namespaces(content)
 
+        # print content
+
         # Find the elements
 
         if upnp_dir is None:
@@ -166,6 +288,18 @@ class UPNPBrowser:
                 raise UPNPBrowserException('Element has no \'id\' attribute')
 
             id = e.attrib['id']
+            if upnp_dir is None:
+                title = e.find('dc:title', ns)
+                if title is None:
+                    print "{0}: Unable to locate title".format(id)
+                    continue
+                res = e.find('default:res', ns)
+                if res is None:
+                    print "{0}: Unable to locate res".format(id)
+                    continue
+
+                result[id] = (title, res)
+                continue
 
             titles = e.findall('dc:title', ns)
 
@@ -173,9 +307,7 @@ class UPNPBrowser:
             if title is None:
                 raise UPNPBrowserException('Unable to locate entry title in content')
 
-            if upnp_dir is None:
-                result[id] = title
-            elif title.text == upnp_dir:
+            if title.text == upnp_dir:
                 result[id] = title
                 break
 
@@ -214,10 +346,16 @@ class UPNPBrowser:
 
         for target in targets:
             for item_id, item in result.items():
-                if target in item.text:
-                    m = re.match('^.*_(\d{8})_\d{4}$', item.text)
+                (title, res) = item
+
+                if title is None:
+                    print "No title element: Skipping item"
+                    continue
+
+                if target in title.text:
+                    m = re.match('^.*_(\d{8})_\d{4}$', title.text)
                     if not m:
-                        raise UPNPBrowserException('{0}: Unable to extract data'.format(item.text))
+                        raise UPNPBrowserException('{0}: Unable to extract data'.format(title.text))
                     t = int(time.mktime(time.strptime(m.group(1), pattern)))
                     if t < start_date:
                         continue
@@ -227,22 +365,17 @@ class UPNPBrowser:
 
 
 def main(targets, start_date):
+
     if len(sys.argv) == 1:
         UPNPBrowser.find_devices()
         return True
 
     upnp = UPNPBrowser(sys.argv[1])
+
     candidates = upnp.find_content(targets, start_date)
 
-    if not candidates:
-        print('No videos found matching criteria')
-        return True
-
-    print upnp.device.services
-
-    c = candidates.keys()[0]
-    print c
-
+    to_download = upnp.list_candidates(candidates)
+    upnp.download(to_download)
 
     return True
 
@@ -250,12 +383,15 @@ def main(targets, start_date):
 if __name__ == '__main__':
 
     target_date = '20181120'
+    target_date = '20180401'
 
     target_list = [
         # 'Doctor Who',
         # 'Castle',
         # 'The First',
-        'The Big Bang Theory'
+        # 'The Big Bang Theory',
+        # 'Mrs Wilson'
+        'Tiny Tumble'
     ]
 
     try:
