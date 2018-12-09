@@ -10,6 +10,7 @@ import math
 import time
 import sys
 import re
+import urllib3
 
 # TODO - store/read timestamp of last execution
 
@@ -33,20 +34,14 @@ class UPNPFile:
 
 class UPNPBrowser:
     UPNP_DEVICES = {
-        'humax2': {
-            'url': 'http://192.168.1.5:55200',
-            'dirs': ['My Contents', 'Recordings']
-        },
-        'humax3': {
-            'url': 'http://192.168.1.5:56790',
-            'dirs': ['My Contents', 'Recordings']
-        },
         'humax': {
             'url': 'http://192.168.1.5:50001',
             'dirs': ['My Contents', 'Recordings']
         },
         'frodo': {
-            'url': 'http://192.168.1.8:8200/rootdesc.xml'
+            'url': 'http://192.168.1.8:8200/rootDesc.xml',
+#            'url': 'https://192.168.1.8:8200',
+            'dirs': ['Videos', 'Folder', 'Videos']
         }
     }
 
@@ -145,8 +140,9 @@ class UPNPBrowser:
             print('No videos found matching criteria')
             return to_download
 
-        for upnp_id in candidates:
-            (title, res) = candidates[upnp_id]
+        for candidate in candidates:
+
+            (upnp_id, title, res) = candidate
 
             if res is None:
                 print "Unable to locate res element"
@@ -161,6 +157,7 @@ class UPNPBrowser:
             print '{0} ({1}) {2}'.format(title, duration, size_str),
 
             if not download:
+                print
                 continue
 
             if force:
@@ -240,6 +237,8 @@ class UPNPBrowser:
         self.device_name = device_name
         self.device_url = self.UPNP_DEVICES[device_name]['url']
 
+        urllib3.disable_warnings()
+        self.device = upnpclient.Device(self.device_url)
         try:
             self.device = upnpclient.Device(self.device_url)
         except requests.exceptions.ConnectionError as exp:
@@ -257,7 +256,7 @@ class UPNPBrowser:
             index = len(result) + 1
         else:
             index = 0
-            result = {}
+            result = []
 
         d = self.device
         res = d['ContentDirectory']['Browse'](
@@ -266,7 +265,7 @@ class UPNPBrowser:
             Filter='*',
             StartingIndex=str(index),
             RequestedCount='0',
-            SortCriteria=''
+            SortCriteria='+dc:date'
         )
 
         if 'NumberReturned' not in res or 'Result' not in res:
@@ -282,8 +281,6 @@ class UPNPBrowser:
         xml = ET.fromstring(content)
 
         ns = UPNPBrowser.extract_namespaces(content)
-
-        # print content
 
         # Find the elements
 
@@ -307,11 +304,12 @@ class UPNPBrowser:
                     print "{0}: Unable to locate title".format(id)
                     continue
                 res = e.find('default:res', ns)
+
                 if res is None:
                     print "{0}: Unable to locate res".format(id)
                     continue
 
-                result[id] = (title, res)
+                result.append((id, title, res))
                 continue
 
             titles = e.findall('dc:title', ns)
@@ -321,7 +319,7 @@ class UPNPBrowser:
                 raise UPNPBrowserException('Unable to locate entry title in content')
 
             if title.text == upnp_dir:
-                result[id] = title
+                result.append((id, title))
                 break
 
         return result
@@ -340,7 +338,8 @@ class UPNPBrowser:
             result = self.browse_device(target_dir, upnp_id)
             if not result:
                 raise UPNPBrowserException('{0}: Unable to locate directory'.format(target_dir))
-            upnp_id = result.keys()[0]
+            res = result[0]
+            upnp_id = res[0]
 
         print('Browsing content.'),
         sys.stdout.flush()
@@ -355,50 +354,56 @@ class UPNPBrowser:
                 break
         print('done')
 
-        candidates = {}
+        candidates = []
 
-        for target in targets:
-            for item_id, item in result.items():
-                (title, res) = item
+        for item in result:
+            (item_id, title, res) = item
 
-                if title is None:
-                    print "No title element: Skipping item"
-                    continue
+            if title is None:
+                print "No title element: Skipping item"
+                continue
 
-                if target in title.text:
-                    m = re.match('^.*_(\d{8})_\d{4}$', title.text)
-                    if not m:
-                        raise UPNPBrowserException('{0}: Unable to extract data'.format(title.text))
-                    t = int(time.mktime(time.strptime(m.group(1), pattern)))
-                    if t < start_date:
-                        continue
+            m = re.match('^.*_(\d{8})_\d{4}$', title.text)
+            if not m:
+                raise UPNPBrowserException('{0}: Unable to extract data'.format(title.text))
+            t = int(time.mktime(time.strptime(m.group(1), pattern)))
+            if t < start_date:
+                break
 
-                    candidates[item_id] = item
+            candidates.append(item)
+
         return candidates
 
 
 def main(targets, start_date):
 
     parser = argparse.ArgumentParser(description='Browse and  download UPNP files')
+    parser.add_argument('-p', '--probe', action='store_true')
     parser.add_argument('-l', '--list', action='store_true')
     parser.add_argument('-d', '--download', action='store_true')
     parser.add_argument('-f', '--force', action='store_true')
     parser.add_argument('device_name', nargs='?')
     args = parser.parse_args()
 
-    if args.list:
+    if args.probe:
         if args.device_name:
-            raise ValueError('Cannot supply device name with list option')
+            raise ValueError('Cannot supply device name with probw option')
         if args.download or args.force:
-            raise ValueError('Option not permitted with list option')
+            raise ValueError('Option not permitted with probe option')
 
         UPNPBrowser.find_devices()
         return True
 
     download = args.download
+    list = args.list
     force = args.force
 
     upnp = UPNPBrowser(args.device_name)
+
+    if list:
+        targets = None
+        start_date = datetime.datetime.now() - datetime.timedelta(weeks=1)
+        start_date = start_date.strftime('%Y%m%d')
 
     candidates = upnp.find_content(targets, start_date)
 
@@ -412,16 +417,14 @@ def main(targets, start_date):
 
 if __name__ == '__main__':
 
-    target_date = '20181120'
-    target_date = '20180401'
+    target_date = '20181202'
 
     target_list = [
-        # 'Doctor Who',
-        # 'Castle',
-        # 'The First',
-        # 'The Big Bang Theory',
-        # 'Mrs Wilson'
-        'Tiny Tumble'
+        'Doctor Who',
+        'Castle',
+        'The First',
+        'The Big Bang Theory',
+        'Mrs Wilson'
     ]
 
     try:
