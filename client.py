@@ -145,11 +145,11 @@ class UPNPBrowser:
             (upnp_id, title, res) = candidate
 
             if res is None:
-                print "Unable to locate res element"
+                print("Unable to locate res element")
                 continue
 
             url = res.text
-            title = title.text
+            title = title.text.encode('utf-8')
             size = int(res.attrib['size'])
             duration = res.attrib['duration']
 
@@ -164,10 +164,12 @@ class UPNPBrowser:
                 print
                 ans = True
             else:
-                print ' - '
+                print ' - ',
 
                 while True:
                     ans = raw_input('Download (y/n)? ')
+                    if ans == '':
+                        ans = 'n'
                     if ans in ('y', 'Y', 'n', 'N'):
                         ans = ans.lower() == 'y'
                         break
@@ -278,6 +280,9 @@ class UPNPBrowser:
 
         content = res['Result']
 
+###
+        content = content.encode('utf-8')
+
         xml = ET.fromstring(content)
 
         ns = UPNPBrowser.extract_namespaces(content)
@@ -363,7 +368,11 @@ class UPNPBrowser:
                 print "No title element: Skipping item"
                 continue
 
-            m = re.match('^.*_(\d{8})_\d{4}$', title.text)
+            # Remove (\d) from title before extracting date part
+
+            xtitle = re.sub('^(.*_\d{8}_\d{4})\(\d+\)$', r'\1', title.text)
+
+            m = re.match('^.*_(\d{8})_\d{4}$', xtitle)
             if not m:
                 raise UPNPBrowserException('{0}: Unable to extract data'.format(title.text))
             t = int(time.mktime(time.strptime(m.group(1), pattern)))
@@ -432,4 +441,7 @@ if __name__ == '__main__':
         sys.exit(0)
     except (ValueError, UPNPBrowserException) as exp:
         print exp
+        import traceback
+        traceback.print_exc(file=sys.stdout)
+
         sys.exit(1)
